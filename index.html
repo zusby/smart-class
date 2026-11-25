@@ -25,7 +25,9 @@ const durMs = () => (quiz?.duration || 20) * 1000;
 const nextIndex = () => { let i = 0; while (i < N() && answers[i]) i++; return i; };
 const startKey = (i) => "lsq-start-" + quiz.game_id + "-" + i;
 function startOf(i) { let t = store.get(startKey(i)); if (!t) { t = Date.now(); store.set(startKey(i), t); } return t; }
-function remaining(i) { const t = store.get(startKey(i)); return t ? Math.max(0, durMs() - (Date.now() - t)) : durMs(); }
+function elapsed(i) { const t = store.get(startKey(i)); return t ? Math.max(0, Date.now() - t) : 0; }
+// stesso calcolo del database: 1000 pt subito, scende fino a 500 al tempo di riferimento, poi resta 500
+const worth = (ms) => Math.max(500, Math.round(1000 * (1 - Math.min(ms, durMs()) / durMs() / 2)));
 const onRecap = () => me && quiz && !feedback && (quiz.phase === "closed" || (quiz.phase === "open" && nextIndex() >= N()));
 
 /* ---------- dati ---------- */
@@ -104,10 +106,10 @@ setInterval(() => {
     return;
   }
   const i = nextIndex(); if (i >= N()) return;
-  const r = remaining(i);
-  document.querySelectorAll("[data-num]").forEach((el) => { el.textContent = Math.ceil(r / 1000); el.classList.toggle("low", r <= 5000); });
-  document.querySelectorAll("[data-bar]").forEach((el) => { el.style.width = (100 * r / durMs()) + "%"; });
-  if (r <= 0 && store.get(startKey(i)) && !pending) submit(i, -1);
+  const e = elapsed(i), w = worth(e);
+  document.querySelectorAll("[data-num]").forEach((el) => { el.textContent = secs(e); });
+  document.querySelectorAll("[data-pts]").forEach((el) => { el.textContent = w; });
+  document.querySelectorAll("[data-bar]").forEach((el) => { el.style.width = (100 * (w - 500) / 500) + "%"; });
 }, 200);
 // aggiornamenti di riserva: numero di giocatori in sala, classifica nel recap, eventi persi
 setInterval(() => { if (quiz && (!me || quiz.phase === "lobby")) loadQuiz(); }, 6000);
@@ -153,8 +155,8 @@ function view() {
       h("div", { class: "wait-dots" }, h("i"), h("i"), h("i"), h("i")),
       h("h1", { class: "big-title", style: "font-size:clamp(30px,9vw,48px)" }, "Ci sei, " + me.nick + "!"),
       h("p", null, "Aspetta che l'organizzatore avvii il quiz. Partirà da solo su questo schermo."),
-      h("p", { class: "muted" }, N() + " domande · " + (quiz.duration || 20) + " secondi ciascuna"),
-      h("p", { class: "muted", style: "font-size:14px" }, "Risposta giusta = da 1000 a 500 punti: più sei veloce, più ne prendi. Risposta sbagliata = 0."),
+      h("p", { class: "muted" }, N() + " domande · nessun limite di tempo"),
+      h("p", { class: "muted", style: "font-size:14px" }, "Risposta giusta = da 1000 a 500 punti: più sei veloce, più ne prendi (500 dopo " + (quiz.duration || 20) + " secondi). Risposta sbagliata = 0."),
       h("span", { class: "chip" }, (quiz.players || 1) + " giocatori in sala")));
     return [header(), box];
   }
@@ -178,10 +180,12 @@ function view() {
   const i = nextIndex();
   if (quiz.phase === "open" && i < N()) {
     startOf(i);
-    const qq = quiz.questions[i], r = remaining(i);
+    const qq = quiz.questions[i], e = elapsed(i), w = worth(e);
     box.append(dots,
-      h("div", { class: "qhead" }, h("p", { class: "eyebrow" }, "Domanda " + (i + 1) + " di " + N()), h("span", { class: "timer-num" + (r <= 5000 ? " low" : ""), "data-num": "" }, Math.ceil(r / 1000))),
-      h("div", { class: "track" }, h("i", { "data-bar": "", style: "width:" + (100 * r / durMs()) + "%" })),
+      h("div", { class: "qhead" }, h("p", { class: "eyebrow" }, "Domanda " + (i + 1) + " di " + N()),
+        h("div", { style: "text-align:right" }, h("div", { class: "timer-num", style: "font-size:28px", "data-num": "" }, secs(e)),
+          h("div", { class: "muted", style: "font-size:13px" }, "vale ancora ", h("b", { class: "mono", "data-pts": "" }, w), " pt"))),
+      h("div", { class: "track" }, h("i", { "data-bar": "", style: "width:" + (100 * (w - 500) / 500) + "%" })),
       h("h2", { class: "qtext fadein" }, qq.q),
       h("div", { class: "opts" }, [0, 1, 2, 3].map((k) => h("button", {
         class: "opt k" + k + (pending && pending.c === k ? " chosen" : ""), onclick: () => submit(i, k), disabled: pending ? true : null,

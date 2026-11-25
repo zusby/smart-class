@@ -146,6 +146,24 @@ td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabu
 .wait-dots i:nth-child(1){background:var(--a)} .wait-dots i:nth-child(2){background:var(--b);animation-delay:.15s}
 .wait-dots i:nth-child(3){background:var(--c);animation-delay:.3s} .wait-dots i:nth-child(4){background:var(--d);animation-delay:.45s}
 
+/* editor domande (conduttore) */
+.editor{display:flex;flex-direction:column;gap:16px}
+.editor input[type=number]{font:inherit;font-size:18px;padding:10px 12px;border-radius:10px;border:2px solid var(--line);background:var(--panel);color:var(--fg);width:100%}
+.qedit{background:var(--stage);border:1px solid var(--line);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.qedit-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.qedit textarea,.qedit input[type=text]{font:inherit;padding:10px 12px;border-radius:10px;border:2px solid var(--line);background:var(--panel);color:var(--fg);width:100%;min-width:0}
+.qedit textarea{font-size:17px;font-weight:600;resize:vertical}
+.answers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.arow{display:grid;grid-template-columns:auto 36px minmax(0,1fr);gap:10px;align-items:center}
+.arow .tagsm{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;font-weight:800;color:var(--ink);background:var(--k);font-family:var(--display)}
+.arow label.right{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer}
+.arow label.right input{accent-color:var(--ok);width:18px;height:18px;margin:0}
+.arow.is-right input[type=text]{border-color:var(--ok)}
+.arow.is-right label.right{color:var(--ok);font-weight:700}
+.ghost.small{padding:6px 10px;font-size:13px}
+.addq{padding:16px;font-size:16px;border-style:dashed}
+@media (max-width:700px){.answers{grid-template-columns:minmax(0,1fr)}}
+
 @media (max-width:900px){
   .lobby,.wall{grid-template-columns:minmax(0,1fr)}
   .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}

@@ -21,7 +21,8 @@ const $app = document.getElementById("app");
 const PLAYER_URL = new URL("index.html", location.href.split("#")[0].split("?")[0]).href;
 let pin = store.get("lsq-pin"), authed = false, data = null, dataStr = "", errMsg = "", busy = false, resetArm = false;
 let fetching = false, again = false, pingTimer = null;
-const RULE = "Ogni risposta giusta vale da 1000 punti (immediata) a 500 (all'ultimo secondo); sbagliata = 0. A parità di punti vince chi è stato più veloce.";
+let view = "main", draft = null, draftDur = 20, editErr = "", saving = false;
+const RULE = "Nessun limite di tempo. Ogni risposta giusta vale da 1000 punti (immediata) a 500 (dopo il tempo di riferimento); sbagliata = 0. A parità di punti vince chi è stato più veloce.";
 
 /* ---------- dati ---------- */
 async function fetchData() {
@@ -91,6 +92,10 @@ function exportCsv() {
 function header() {
   const tools = h("div", { class: "tools" });
   if (data && data.phase === "open") tools.append(h("span", { class: "live" }, "Live"));
+  if (data && view === "main") tools.append(h("button", {
+    class: "ghost", onclick: openEditor, disabled: data.phase !== "lobby" || null,
+    title: data.phase !== "lobby" ? "Si modificano solo in sala d'attesa: premi Nuova partita" : null,
+  }, "Domande"));
   if (data && data.players.length) tools.append(h("button", { class: "ghost", onclick: exportCsv }, "Scarica CSV"));
   if (data) tools.append(h("button", { class: "ghost" + (resetArm ? " warn" : ""), onclick: () => {
     if (resetArm) { resetArm = false; act("admin_new_game"); }
@@ -198,9 +203,82 @@ function hostView() {
   return out;
 }
 
+/* ---------- editor delle domande ---------- */
+function openEditor() {
+  draft = data.questions.map((q) => ({ q: q.q, a: q.a.slice(), c: q.c }));
+  draftDur = data.duration; editErr = ""; view = "edit";
+  rebuildEditor(); window.scrollTo(0, 0);
+}
+function closeEditor() { view = "main"; draft = null; editErr = ""; $app.replaceChildren(...hostView()); }
+function rebuildEditor() { $app.replaceChildren(...editorView()); }
+
+async function saveQuestions() {
+  const clean = draft.map((d) => ({ q: d.q.trim(), a: d.a.map((x) => x.trim()), c: d.c }));
+  const bad = clean.findIndex((d) => !d.q || d.a.some((x) => !x));
+  if (!clean.length) editErr = "Serve almeno una domanda.";
+  else if (bad >= 0) editErr = "Completa la domanda " + (bad + 1) + ": testo e tutte e 4 le risposte.";
+  else if (!(draftDur >= 5 && draftDur <= 120)) editErr = "Il tempo di riferimento deve essere tra 5 e 120 secondi.";
+  else editErr = "";
+  if (editErr) { rebuildEditor(); window.scrollTo(0, 0); return; }
+  saving = true; rebuildEditor();
+  try {
+    await rpc("admin_save_questions", { p_pin: pin, p_questions: clean, p_duration: Math.round(draftDur) });
+    saving = false; dataStr = ""; await fetchData(); closeEditor();
+  } catch (e) {
+    saving = false;
+    editErr = /admin_save_questions/.test(e.message) ? "Manca la funzione nel database: esegui aggiornamento-editor-domande.sql su Supabase." : e.message;
+    rebuildEditor(); window.scrollTo(0, 0);
+  }
+}
+
+function editorView() {
+  const wrap = h("div", { id: "editor", class: "editor" });
+  const actions = () => h("div", { class: "tools" },
+    h("button", { class: "ghost", onclick: closeEditor }, "Annulla"),
+    h("button", { class: "primary", onclick: saveQuestions, disabled: saving || null }, saving ? "Salvataggio…" : "Salva domande"));
+  wrap.append(h("div", { class: "bar" },
+    h("div", null, h("p", { class: "eyebrow" }, draft.length + " domande · le modifiche valgono dalla prossima partita"), h("h1", { style: "font-size:clamp(28px,4vw,46px)" }, "Domande del quiz")),
+    actions()));
+  if (editErr) wrap.append(h("div", { class: "err" }, editErr));
+
+  const dur = h("input", { id: "dur", type: "number", min: "5", max: "120", step: "1", value: draftDur });
+  dur.addEventListener("input", () => (draftDur = Number(dur.value)));
+  wrap.append(h("div", { class: "field", style: "max-width:420px" }, h("label", { for: "dur", class: "muted" }, "Tempo di riferimento per il punteggio (secondi)"), dur, h("small", { class: "muted" }, "Nessun limite per rispondere: una risposta giusta vale 1000 punti se immediata e scende fino a 500 a questo tempo.")));
+
+  draft.forEach((d, i) => {
+    const ta = h("textarea", { id: "q" + i, rows: "2", maxlength: "300", placeholder: "Scrivi la domanda" });
+    ta.value = d.q; ta.addEventListener("input", () => (d.q = ta.value));
+    const move = (to) => { const [x] = draft.splice(i, 1); draft.splice(to, 0, x); rebuildEditor(); };
+    const rows = [0, 1, 2, 3].map((k) => {
+      const radio = h("input", { type: "radio", name: "c" + i, id: "c" + i + "_" + k, checked: d.c === k || null });
+      const inp = h("input", { type: "text", id: "a" + i + "_" + k, maxlength: "150", placeholder: "Risposta " + LETTERS[k], "aria-label": "Risposta " + LETTERS[k] + " della domanda " + (i + 1) });
+      inp.value = d.a[k]; inp.addEventListener("input", () => (d.a[k] = inp.value));
+      const row = h("div", { class: "arow k" + k + (d.c === k ? " is-right" : "") },
+        h("label", { class: "right", for: "c" + i + "_" + k }, radio, "Giusta"), h("span", { class: "tagsm" }, LETTERS[k]), inp);
+      radio.addEventListener("change", () => { d.c = k; row.parentNode.querySelectorAll(".arow").forEach((r, j) => r.classList.toggle("is-right", j === k)); });
+      return row;
+    });
+    wrap.append(h("div", { class: "qedit" },
+      h("div", { class: "qedit-head" }, h("label", { class: "eyebrow", for: "q" + i }, "Domanda " + (i + 1)),
+        h("div", { class: "tools" },
+          h("button", { class: "ghost small", onclick: () => move(i - 1), disabled: i === 0 || null, "aria-label": "Sposta su" }, "↑ Su"),
+          h("button", { class: "ghost small", onclick: () => move(i + 1), disabled: i === draft.length - 1 || null, "aria-label": "Sposta giù" }, "↓ Giù"),
+          h("button", { class: "ghost small warn", onclick: () => { draft.splice(i, 1); rebuildEditor(); }, disabled: draft.length === 1 || null }, "Elimina"))),
+      ta, h("div", { class: "answers" }, rows)));
+  });
+
+  wrap.append(h("button", { class: "ghost addq", onclick: () => {
+    draft.push({ q: "", a: ["", "", "", ""], c: 0 }); rebuildEditor();
+    const t = document.getElementById("q" + (draft.length - 1)); if (t) { t.scrollIntoView({ block: "center" }); t.focus(); }
+  } }, "+ Aggiungi domanda"));
+  wrap.append(h("div", { class: "bar", style: "justify-content:flex-end" }, actions()));
+  return [header(), wrap];
+}
+
 function render() {
   if (!sb) { showNotConfigured($app); return; }
   if (!authed) { if (!document.getElementById("pin") || errMsg) $app.replaceChildren(...pinView()); return; }
+  if (view === "edit") { if (!document.getElementById("editor")) rebuildEditor(); return; }   // non toccare ciò che stai scrivendo
   $app.replaceChildren(...hostView());
 }
 
