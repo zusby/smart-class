@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Quiz Logical System · Conduttore</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"><div class="center"><p class="muted pulse">Caricamento…</p></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $app = document.getElementById("app");
+const PLAYER_URL = new URL("index.html", location.href.split("#")[0].split("?")[0]).href;
+let pin = store.get("lsq-pin"), authed = false, data = null, dataStr = "", errMsg = "", busy = false, resetArm = false;
+let fetching = false, again = false, pingTimer = null;
+const RULE = "Ogni risposta giusta vale da 1000 punti (immediata) a 500 (all'ultimo secondo); sbagliata = 0. A parità di punti vince chi è stato più veloce.";
+
+/* ---------- dati ---------- */
+async function fetchData() {
+  if (!pin) return;
+  if (fetching) { again = true; return; }
+  fetching = true;
+  try {
+    const d = await rpc("admin_results", { p_pin: pin });
+    if (!authed) { authed = true; store.set("lsq-pin", pin); }
+    errMsg = "";
+    const s = JSON.stringify(d);
+    if (s !== dataStr) { dataStr = s; data = d; render(); }
+  } catch (e) {
+    if (/PIN/.test(e.message)) { authed = false; pin = null; store.del("lsq-pin"); errMsg = "PIN errato."; render(); }
+    else { errMsg = "Connessione instabile: " + e.message; render(); }
+  } finally {
+    fetching = false;
+    if (again) { again = false; fetchData(); }
+  }
+}
+function soon() { clearTimeout(pingTimer); pingTimer = setTimeout(fetchData, 250); }
+async function act(fn, extra) {
+  if (busy) return; busy = true; render();
+  try { await rpc(fn, { p_pin: pin, ...(extra || {}) }); await fetchData(); }
+  catch (e) { errMsg = e.message; }
+  finally { busy = false; render(); }
+}
+
+/* ---------- calcoli ---------- */
+function players() {
+  if (!data) return [];
+  return (data.players || []).map((p) => {
+    const answers = {};
+    for (const k in p.answers || {}) { const a = p.answers[k]; answers[+k] = { c: a.c, ms: a.ms, ok: a.ok, pts: a.pts, at: Date.parse(a.at) || 0 }; }
+    return { id: p.id, nick: p.nick, joinedAt: Date.parse(p.joined_at) || 0, answers };
+  });
+}
+function standings() {
+  const NQ = data.questions.length;
+  return players().map((p) => {
+    let pts = 0, cor = 0, tc = 0, n = 0, tot = 0;
+    for (const k in p.answers) { const a = p.answers[k]; n++; tot += a.ms; if (a.ok) { cor++; tc += a.ms; pts += a.pts; } }
+    return { ...p, pts, cor, tc, n, tot, done: n >= NQ };
+  }).sort((x, y) => y.pts - x.pts || x.tc - y.tc || y.n - x.n || x.nick.localeCompare(y.nick));
+}
+
+/* ---------- export CSV ---------- */
+function exportCsv() {
+  const st = standings(), Q = data.questions;
+  const esc = (v) => '"' + String(v).replace(/"/g, '""') + '"';
+  const head = ["Posizione", "Giocatore", "Punti", "Corrette", "Tempo totale (s)"];
+  Q.forEach((_, i) => head.push("D" + (i + 1) + " risposta", "D" + (i + 1) + " esito", "D" + (i + 1) + " tempo (s)"));
+  const rows = [head];
+  st.forEach((s, r) => {
+    const row = [r + 1, s.nick, s.pts, s.cor, (s.tot / 1000).toFixed(1).replace(".", ",")];
+    Q.forEach((_, i) => { const a = s.answers[i];
+      if (!a) row.push("", "", ""); else row.push(a.c < 0 ? "tempo scaduto" : LETTERS[a.c], a.ok ? "corretta" : "sbagliata", (a.ms / 1000).toFixed(1).replace(".", ",")); });
+    rows.push(row);
+  });
+  const csv = "﻿" + rows.map((r) => r.map(esc).join(";")).join("\r\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const a = h("a", { href: url, download: "risultati-quiz-" + data.game_id + ".csv" });
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* ---------- viste ---------- */
+function header() {
+  const tools = h("div", { class: "tools" });
+  if (data && data.phase === "open") tools.append(h("span", { class: "live" }, "Live"));
+  if (data && data.players.length) tools.append(h("button", { class: "ghost", onclick: exportCsv }, "Scarica CSV"));
+  if (data) tools.append(h("button", { class: "ghost" + (resetArm ? " warn" : ""), onclick: () => {
+    if (resetArm) { resetArm = false; act("admin_new_game"); }
+    else { resetArm = true; render(); setTimeout(() => { resetArm = false; render(); }, 4000); }
+  } }, resetArm ? "Confermi? Tocca di nuovo" : "Nuova partita"));
+  tools.append(h("button", { class: "ghost", onclick: () => { store.del("lsq-pin"); pin = null; authed = false; data = null; dataStr = ""; render(); } }, "Esci"));
+  return h("header", { class: "bar" }, h("div", { class: "brand" }, h("span", { class: "dot" }), "Logical System · Quiz"), tools);
+}
+
+function pinView() {
+  const inp = h("input", { id: "pin", type: "password", autocomplete: "current-password", placeholder: "PIN del conduttore" });
+  const go = () => { if (!inp.value) return; pin = inp.value; errMsg = ""; fetchData(); };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  setTimeout(() => inp.focus(), 50);
+  return [h("div", { class: "center" },
+    h("p", { class: "eyebrow" }, "Schermo del conduttore"),
+    h("h1", { class: "big-title" }, "Quiz Logical System"),
+    h("div", { class: "field", style: "max-width:360px" }, h("label", { for: "pin", class: "muted" }, "PIN"), inp),
+    errMsg ? h("div", { class: "err" }, errMsg) : null,
+    h("button", { class: "primary", onclick: go }, "Entra"))];
+}
+
+function boardList(rows, NQ) {
+  return h("ol", { class: "board" }, rows.map((s, i) => h("li", { class: i === 0 && s.pts > 0 ? "top1" : "" },
+    h("span", { class: "pos" }, i + 1),
+    h("div", { style: "min-width:0" }, h("div", { class: "nick" }, s.nick), h("div", { class: "sub" }, s.cor + " corrette" + (s.cor ? " · media " + secs(s.tc / s.cor) : ""))),
+    h("div", { class: "prog" }, h("div", { class: "t" }, h("i", { class: s.done ? "done" : "", style: "width:" + (100 * s.n / NQ) + "%" })), h("small", null, s.done ? "Finito" : "Domanda " + Math.min(s.n + 1, NQ) + " / " + NQ)),
+    h("span", { class: "pts" }, s.pts))));
+}
+
+function hostView() {
+  const out = [header()];
+  if (errMsg) out.push(h("div", { class: "err" }, errMsg));
+  if (!data) { out.push(h("div", { class: "center" }, h("p", { class: "muted pulse" }, "Caricamento dei risultati…"))); return out; }
+  const Q = data.questions, NQ = Q.length, st = standings();
+
+  if (data.phase === "lobby") {
+    const qr = h("div", { class: "qr" });
+    try { const g = qrcode(0, "M"); g.addData(PLAYER_URL); g.make(); qr.innerHTML = g.createSvgTag({ cellSize: 6, margin: 2, scalable: true }); } catch (e) { qr.hidden = true; }
+    out.push(h("div", { class: "lobby" },
+      h("div", { class: "card join-box" }, h("p", { class: "eyebrow" }, "Inquadra per giocare"), qr,
+        h("p", null, "Scrivi il tuo nickname e aspetta il via."),
+        h("p", { class: "mono muted", style: "font-size:13px;word-break:break-all" }, PLAYER_URL)),
+      h("div", { class: "card", style: "display:flex;flex-direction:column;gap:18px" },
+        h("div", { class: "bar" },
+          h("div", null, h("p", { class: "eyebrow" }, "In sala"), h("div", { class: "count" }, st.length)),
+          h("button", { class: "primary", onclick: () => act("admin_set_phase", { p_phase: "open" }), disabled: busy || !st.length || null }, "Avvia il quiz")),
+        st.length ? h("div", { class: "roster" }, st.slice().sort((a, b) => a.joinedAt - b.joinedAt).map((p) => h("span", { class: "chip" }, p.nick)))
+                  : h("p", { class: "muted pulse" }, "In attesa dei primi giocatori…"))));
+    return out;
+  }
+
+  const closed = data.phase === "closed";
+  const done = st.filter((s) => s.done).length, totAns = st.reduce((t, s) => t + s.n, 0), totCor = st.reduce((t, s) => t + s.cor, 0);
+  out.push(h("div", { class: "bar" },
+    h("div", null, h("p", { class: "eyebrow" }, closed ? "Quiz chiuso" : "Quiz in corso"), h("h1", { style: "font-size:clamp(28px,4vw,46px)" }, closed ? "Risultati finali" : "Recap in tempo reale")),
+    closed ? null : h("button", { class: "primary", onclick: () => act("admin_set_phase", { p_phase: "closed" }), disabled: busy || null }, "Chiudi e mostra il podio")));
+
+  if (closed) {
+    const step = (s, n) => h("div", { class: "step p" + n }, s ? h("span", { class: "nick" }, s.nick) : h("span", { class: "muted" }, "—"), s ? h("span", { class: "mono muted" }, s.pts + " pt") : null, h("div", { class: "blk" }, n));
+    out.push(h("div", { class: "podium" }, step(st[1], 2), step(st[0], 1), step(st[2], 3)),
+      h("p", { class: "muted", style: "text-align:center;margin:0" }, RULE));
+  }
+
+  out.push(h("div", { class: "tiles" },
+    h("div", { class: "tile" }, h("b", null, st.length), h("span", null, "Giocatori")),
+    h("div", { class: "tile" }, h("b", null, st.length - done), h("span", null, "Stanno giocando")),
+    h("div", { class: "tile" }, h("b", null, done + " / " + st.length), h("span", null, "Hanno finito")),
+    h("div", { class: "tile" }, h("b", null, totAns ? Math.round(100 * totCor / totAns) + "%" : "—"), h("span", null, "Risposte corrette"))));
+
+  const events = [];
+  st.forEach((p) => { for (const k in p.answers) events.push({ nick: p.nick, i: +k, a: p.answers[k] }); });
+  events.sort((x, y) => y.a.at - x.a.at);
+  out.push(h("div", { class: "wall" },
+    h("div", { class: "card" }, h("div", { class: "panel-head" }, h("h3", null, "Classifica"), h("span", { class: "muted", style: "font-size:13px" }, "risposta giusta + velocità · si aggiorna a ogni risposta")),
+      st.length ? boardList(st, NQ) : h("p", { class: "muted" }, "Nessun giocatore.")),
+    h("div", { class: "card" }, h("div", { class: "panel-head" }, h("h3", null, "Ultime risposte")),
+      events.length ? h("ul", { class: "feed" }, events.slice(0, 10).map((e) => {
+        const skip = e.a.c < 0;
+        return h("li", null, h("span", { class: "mk " + (skip ? "z" : e.a.ok ? "y" : "x") }, skip ? "–" : e.a.ok ? "✓" : "✗"),
+          h("span", { class: "who" }, e.nick + " · D" + (e.i + 1) + (skip ? " tempo scaduto" : " risposta " + LETTERS[e.a.c])),
+          h("span", { class: "mono muted" }, skip ? "" : secs(e.a.ms) + " · ", h("span", { "data-ago": e.a.at }, ago(e.a.at))));
+      })) : h("p", { class: "muted pulse" }, "Le risposte compariranno qui appena arrivano."))));
+
+  out.push(h("h3", null, "Domanda per domanda"), h("div", { class: "qgrid" }, Q.map((qq, i) => {
+    const counts = [0, 0, 0, 0]; let n = 0, cor = 0, tc = 0;
+    st.forEach((p) => { const a = p.answers[i]; if (!a) return; n++; if (a.c >= 0 && a.c < 4) counts[a.c]++; if (a.ok) { cor++; tc += a.ms; } });
+    const max = Math.max(1, ...counts);
+    return h("div", { class: "qcard" },
+      h("div", { class: "meta" }, h("span", { class: "eyebrow" }, "D" + (i + 1)), h("span", null, n + " risposte")),
+      h("div", { class: "qt" }, qq.q),
+      h("div", { class: "meta" }, h("span", { class: "pct " + (n ? (cor / n >= 0.5 ? "y" : "x") : "z") }, n ? Math.round(100 * cor / n) + "%" : "—"), h("span", null, cor ? "media corrette " + secs(tc / cor) : "")),
+      h("div", { class: "mini" }, [0, 1, 2, 3].map((k) => h("div", { class: "k" + k + (k === qq.c ? " ok" : ""), title: qq.a[k] },
+        h("span", { class: "l" }, LETTERS[k]), h("span", { class: "t" }, h("i", { style: "width:" + (100 * counts[k] / max) + "%" })), h("span", { class: "n" }, counts[k])))));
+  })));
+
+  out.push(h("h3", null, "Dettaglio risposte e tempi"), h("div", { class: "scroll" }, h("table", null,
+    h("thead", null, h("tr", null, h("th", null, "#"), h("th", null, "Giocatore"), h("th", { class: "num" }, "Punti"), Q.map((_, i) => h("th", { class: "num" }, "D" + (i + 1))), h("th", { class: "num" }, "Tempo tot."))),
+    h("tbody", null, st.map((s, r) => h("tr", null, h("td", { class: "num" }, r + 1), h("td", null, s.nick), h("td", { class: "num" }, s.pts),
+      Q.map((qq, i) => { const a = s.answers[i];
+        if (!a) return h("td", { class: "num" }, h("span", { class: "z" }, "·"));
+        if (a.c < 0) return h("td", { class: "num" }, h("span", { class: "z" }, "⏱"));
+        return h("td", { class: "num" }, h("span", { class: a.ok ? "y" : "x" }, (a.ok ? "✓ " : "✗ ") + LETTERS[a.c]), " ", secs(a.ms)); }),
+      h("td", { class: "num" }, secs(s.tot))))))));
+  return out;
+}
+
+function render() {
+  if (!sb) { showNotConfigured($app); return; }
+  if (!authed) { if (!document.getElementById("pin") || errMsg) $app.replaceChildren(...pinView()); return; }
+  $app.replaceChildren(...hostView());
+}
+
+/* ---------- avvio ---------- */
+setInterval(() => { document.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(Number(el.dataset.ago)))); }, 1000);
+if (sb) {
+  pingChannel(soon);            // un giocatore ha risposto o è entrato → aggiorna subito
+  stateChannel(soon);
+  setInterval(() => { if (authed) fetchData(); }, 3000);   // riserva, se un evento va perso
+  if (pin) fetchData(); else render();
+} else render();
+</script>
+</body>
+</html>

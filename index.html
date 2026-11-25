@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Quiz Logical System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"><div class="center"><p class="muted pulse">Caricamento del quiz…</p></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const FEEDBACK_MS = 2500;
+const $app = document.getElementById("app");
+let quiz = null, me = null, answers = {}, feedback = null, pending = null, summary = null;
+let errMsg = "", busy = false, lastSig = "", ping = null, loading = false;
+
+const N = () => (quiz ? quiz.questions.length : 0);
+const durMs = () => (quiz?.duration || 20) * 1000;
+const nextIndex = () => { let i = 0; while (i < N() && answers[i]) i++; return i; };
+const startKey = (i) => "lsq-start-" + quiz.game_id + "-" + i;
+function startOf(i) { let t = store.get(startKey(i)); if (!t) { t = Date.now(); store.set(startKey(i), t); } return t; }
+function remaining(i) { const t = store.get(startKey(i)); return t ? Math.max(0, durMs() - (Date.now() - t)) : durMs(); }
+const onRecap = () => me && quiz && !feedback && (quiz.phase === "closed" || (quiz.phase === "open" && nextIndex() >= N()));
+
+/* ---------- dati ---------- */
+async function loadQuiz() {
+  if (loading) return; loading = true;
+  try {
+    const q = await rpc("get_quiz");
+    const newGame = !quiz || q.game_id !== quiz.game_id;
+    const phaseChanged = quiz && q.phase !== quiz.phase;
+    quiz = q;
+    if (newGame) {
+      answers = {}; feedback = null; summary = null; me = null;
+      const saved = store.get("lsq-player");
+      if (saved && saved.game_id === q.game_id) {
+        try {
+          const r = await rpc("resume_player", { p_player: saved.player_id, p_secret: saved.secret });
+          if (r.ok) { me = saved; (r.answers || []).forEach((a) => (answers[a.q] = a)); }
+          else store.del("lsq-player");
+        } catch (e) { store.del("lsq-player"); }
+      }
+    }
+    errMsg = "";
+    render();
+    if ((newGame || phaseChanged) && onRecap()) loadSummary();
+  } catch (e) {
+    errMsg = "Connessione non riuscita: " + e.message; render();
+  } finally { loading = false; }
+}
+function onStateRow(row) {
+  if (!row || !quiz) return;
+  if (row.game_id !== quiz.game_id) { loadQuiz(); return; }
+  const changed = row.phase !== quiz.phase;
+  quiz.phase = row.phase; quiz.duration = row.duration || quiz.duration;
+  render();
+  if (changed && onRecap()) loadSummary();
+}
+async function loadSummary() {
+  if (!me) return;
+  try { summary = await rpc("my_summary", { p_player: me.player_id, p_secret: me.secret }); render(); } catch (e) {}
+}
+
+async function join(nick) {
+  if (busy) return; busy = true; errMsg = ""; render();
+  try {
+    const r = await rpc("join_quiz", { p_nick: nick });
+    me = { player_id: r.player_id, secret: r.secret, game_id: r.game_id, nick: r.nick };
+    store.set("lsq-player", me); store.set("lsq-nick", nick);
+    if (ping) ping.send({ type: "broadcast", event: "ping", payload: {} });
+    quiz.players = (quiz.players || 0) + 1;
+  } catch (e) { errMsg = e.message; }
+  finally { busy = false; render(); }
+}
+
+async function submit(i, choice) {
+  if (pending || answers[i] || !quiz || quiz.phase !== "open") return;
+  const ms = choice < 0 ? durMs() : Date.now() - startOf(i);
+  pending = { i, c: choice }; errMsg = ""; render();
+  try {
+    const r = await rpc("submit_answer", { p_player: me.player_id, p_secret: me.secret, p_q: i, p_choice: choice, p_ms: Math.round(ms) });
+    answers[i] = r;
+    feedback = { i, until: Date.now() + FEEDBACK_MS };
+    if (ping) ping.send({ type: "broadcast", event: "ping", payload: {} });
+  } catch (e) {
+    errMsg = e.message;
+    if (/non è aperto|non più attiva/.test(e.message)) loadQuiz();
+  } finally { pending = null; render(); }
+}
+function goNext() { feedback = null; render(); if (onRecap()) loadSummary(); }
+
+/* ---------- timer ---------- */
+setInterval(() => {
+  if (!quiz || !me || quiz.phase !== "open") return;
+  if (feedback) {
+    if (Date.now() >= feedback.until) goNext();
+    else { const el = document.querySelector("[data-next]"); if (el) el.style.width = (100 * (feedback.until - Date.now()) / FEEDBACK_MS) + "%"; }
+    return;
+  }
+  const i = nextIndex(); if (i >= N()) return;
+  const r = remaining(i);
+  document.querySelectorAll("[data-num]").forEach((el) => { el.textContent = Math.ceil(r / 1000); el.classList.toggle("low", r <= 5000); });
+  document.querySelectorAll("[data-bar]").forEach((el) => { el.style.width = (100 * r / durMs()) + "%"; });
+  if (r <= 0 && store.get(startKey(i)) && !pending) submit(i, -1);
+}, 200);
+// aggiornamenti di riserva: numero di giocatori in sala, classifica nel recap, eventi persi
+setInterval(() => { if (quiz && (!me || quiz.phase === "lobby")) loadQuiz(); }, 6000);
+setInterval(() => { if (onRecap() && quiz.phase === "open") loadSummary(); }, 5000);
+setInterval(() => { if (quiz && me && quiz.phase !== "lobby") loadQuiz(); }, 20000);
+
+/* ---------- viste ---------- */
+function header() {
+  const tools = h("div", { class: "tools" });
+  if (quiz && quiz.phase === "open") tools.append(h("span", { class: "live" }, "Live"));
+  if (me) {
+    let pts = 0; for (const k in answers) pts += answers[k].pts || 0;
+    tools.append(h("span", { class: "chip" }, me.nick, " · ", h("b", { class: "mono" }, pts), " pt"));
+  }
+  return h("header", { class: "bar" }, h("div", { class: "brand" }, h("span", { class: "dot" }), "Logical System · Quiz"), tools);
+}
+
+function view() {
+  const box = h("div", { class: "phone" });
+  if (errMsg) box.append(h("div", { class: "err" }, errMsg));
+  if (!quiz) { box.append(h("div", { class: "center" }, h("p", { class: "muted pulse" }, "Collegamento in corso…"))); return [header(), box]; }
+
+  // 1. nickname
+  if (!me) {
+    if (quiz.phase === "closed") {
+      box.append(h("div", { class: "center" }, h("h2", null, "Il quiz è chiuso"), h("p", { class: "muted" }, "Aspetta che l'organizzatore apra una nuova partita.")));
+      return [header(), box];
+    }
+    const inp = h("input", { id: "nick", maxlength: "20", autocomplete: "off", autocapitalize: "words", enterkeyhint: "go", placeholder: "Es. Marco R.", value: store.get("lsq-nick") || "" });
+    const go = () => { const n = inp.value.replace(/\s+/g, " ").trim(); if (!n) { inp.focus(); return; } join(n); };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    box.append(h("div", { class: "center" },
+      h("p", { class: "eyebrow" }, "Quiz Logical System"),
+      h("h1", { class: "big-title", style: "font-size:clamp(32px,10vw,52px)" }, "Come ti chiami?"),
+      h("div", { class: "field" }, h("label", { for: "nick", class: "muted" }, "Il tuo nickname"), inp),
+      h("button", { class: "primary", style: "width:100%", onclick: go, disabled: busy || null }, busy ? "Un attimo…" : "Entra")));
+    return [header(), box];
+  }
+
+  // 2. attesa del via
+  if (quiz.phase === "lobby") {
+    box.append(h("div", { class: "center" },
+      h("div", { class: "wait-dots" }, h("i"), h("i"), h("i"), h("i")),
+      h("h1", { class: "big-title", style: "font-size:clamp(30px,9vw,48px)" }, "Ci sei, " + me.nick + "!"),
+      h("p", null, "Aspetta che l'organizzatore avvii il quiz. Partirà da solo su questo schermo."),
+      h("p", { class: "muted" }, N() + " domande · " + (quiz.duration || 20) + " secondi ciascuna"),
+      h("p", { class: "muted", style: "font-size:14px" }, "Risposta giusta = da 1000 a 500 punti: più sei veloce, più ne prendi. Risposta sbagliata = 0."),
+      h("span", { class: "chip" }, (quiz.players || 1) + " giocatori in sala")));
+    return [header(), box];
+  }
+
+  const dots = h("div", { class: "dots" }, quiz.questions.map((_, k) => h("span", { class: answers[k] ? (answers[k].ok ? "y" : "x") : (k === nextIndex() && quiz.phase === "open" ? "cur" : "") })));
+
+  // 3. esito della risposta
+  if (feedback && answers[feedback.i] && quiz.phase === "open") {
+    const k = feedback.i, a = answers[k], qq = quiz.questions[k];
+    box.append(dots, h("div", { class: "result fadein " + (a.ok ? "ok" : "bad") },
+      h("div", { class: "head" }, a.c < 0 ? "Tempo scaduto" : a.ok ? "Corretto!" : "Sbagliato"),
+      a.ok ? h("div", { class: "mono", style: "font-size:28px;font-weight:700" }, "+" + a.pts + " pt") : null,
+      a.c >= 0 ? h("p", { class: "muted" }, "Hai risposto in " + secs(a.ms)) : null,
+      !a.ok ? h("p", null, "Risposta giusta: ", h("b", null, LETTERS[a.right] + " – " + qq.a[a.right])) : null),
+      h("div", { class: "track" }, h("i", { "data-next": "", style: "width:100%" })),
+      h("button", { class: "primary", style: "width:100%", onclick: goNext }, k + 1 < N() ? "Prossima domanda" : "Vedi il tuo recap"));
+    return [header(), box];
+  }
+
+  // 4. domanda
+  const i = nextIndex();
+  if (quiz.phase === "open" && i < N()) {
+    startOf(i);
+    const qq = quiz.questions[i], r = remaining(i);
+    box.append(dots,
+      h("div", { class: "qhead" }, h("p", { class: "eyebrow" }, "Domanda " + (i + 1) + " di " + N()), h("span", { class: "timer-num" + (r <= 5000 ? " low" : ""), "data-num": "" }, Math.ceil(r / 1000))),
+      h("div", { class: "track" }, h("i", { "data-bar": "", style: "width:" + (100 * r / durMs()) + "%" })),
+      h("h2", { class: "qtext fadein" }, qq.q),
+      h("div", { class: "opts" }, [0, 1, 2, 3].map((k) => h("button", {
+        class: "opt k" + k + (pending && pending.c === k ? " chosen" : ""), onclick: () => submit(i, k), disabled: pending ? true : null,
+      }, h("span", { class: "tag" }, LETTERS[k]), h("span", { class: "txt" }, qq.a[k])))),
+      pending ? h("p", { class: "muted pulse", style: "text-align:center" }, "Invio della risposta…") : null);
+    return [header(), box];
+  }
+
+  // 5. recap personale
+  const s = summary;
+  let pts = 0, cor = 0, tot = 0;
+  for (const k in answers) { pts += answers[k].pts || 0; if (answers[k].ok) cor++; tot += answers[k].ms || 0; }
+  box.append(h("div", { class: "center", style: "flex:0;padding-block:8px" },
+      h("p", { class: "eyebrow" }, quiz.phase === "closed" ? "Classifica finale" : "Hai finito!"),
+      h("h1", { class: "big-title", style: "font-size:clamp(40px,14vw,72px)" }, s && s.rank ? s.rank + "° posto" : "…"),
+      s ? h("p", { class: "muted" }, "su " + s.total + " giocatori" + (quiz.phase === "open" && s.still_playing ? " · " + s.still_playing + " stanno ancora giocando, la posizione può cambiare" : "")) : h("p", { class: "muted pulse" }, "Calcolo della classifica…")),
+    h("div", { class: "stats" },
+      h("div", { class: "stat" }, h("b", null, pts), h("span", null, "Punti")),
+      h("div", { class: "stat" }, h("b", null, cor + "/" + N()), h("span", null, "Corrette")),
+      h("div", { class: "stat" }, h("b", null, secs(tot)), h("span", null, "Tempo totale"))));
+  if (s && s.top && s.top.length) {
+    box.append(h("h3", null, "Classifica live"), h("ol", { class: "board noprog" }, s.top.map((t, idx) => h("li", { class: (idx === 0 && t.pts > 0 ? "top1" : "") + (t.me ? " me" : "") },
+      h("span", { class: "pos" }, idx + 1), h("div", { style: "min-width:0" }, h("div", { class: "nick" }, t.nick), h("div", { class: "sub" }, t.cor + " corrette")), h("span", { class: "pts" }, t.pts)))));
+  }
+  box.append(h("h3", null, "Le tue risposte"), h("ol", { class: "recap" }, quiz.questions.map((qq, k) => {
+    const a = answers[k];
+    return h("li", null,
+      h("div", { class: "r1" }, h("span", null, "D" + (k + 1)), h("span", { class: "mono" }, a ? (a.ok ? "+" + a.pts + " pt · " : "") + (a.c < 0 ? "tempo scaduto" : secs(a.ms)) : "non risposta")),
+      h("div", { class: "q" }, qq.q),
+      h("div", { class: "a" }, a && a.c >= 0 ? h("span", { class: a.ok ? "y" : "x" }, (a.ok ? "✓ " : "✗ ") + LETTERS[a.c] + " – " + qq.a[a.c]) : h("span", { class: "z" }, "Nessuna risposta")),
+      a && !a.ok ? h("div", { class: "a muted" }, "Giusta: " + LETTERS[a.right] + " – " + qq.a[a.right]) : null);
+  })));
+  return [header(), box];
+}
+
+function render() {
+  // non ricostruire lo schermo mentre si scrive il nickname o si legge la stessa domanda
+  const sig = [quiz?.game_id, quiz?.phase, !!me, nextIndex(), feedback ? feedback.i : "-", pending ? pending.c : "-", errMsg, busy, me ? quiz?.players : "", JSON.stringify(summary)].join("|");
+  if (sig === lastSig) return;
+  lastSig = sig;
+  $app.replaceChildren(...view());
+}
+
+/* ---------- avvio ---------- */
+if (!sb) showNotConfigured($app);
+else {
+  stateChannel(onStateRow);
+  ping = pingChannel();
+  loadQuiz();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadQuiz(); });
+}
+</script>
+</body>
+</html>
